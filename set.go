@@ -1,7 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"io/ioutil"
+	"os"
 	"sync"
+)
+
+const (
+	ModeTypicalPerm os.FileMode = 0755
 )
 
 type Set struct {
@@ -45,4 +52,17 @@ func (s *Set) Remove(str string) {
 	defer s.mutex.Unlock()
 
 	delete(s.m, str)
+}
+
+func (s *Set) Save(file string) error {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var buf bytes.Buffer
+
+	for k, _ := range s.m {
+		buf.WriteString(k + "\n")
+	}
+
+	return ioutil.WriteFile(file, buf.Bytes(), ModeTypicalPerm)
 }

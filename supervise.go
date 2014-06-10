@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +14,10 @@ import (
 	"menteslibres.net/gosexy/to"
 
 	dclient "github.com/fsouza/go-dockerclient"
+)
+
+const (
+	PERSIST_FILE = "lastSet.dat"
 )
 
 func envopt(name, def string) string {
@@ -46,8 +52,40 @@ func main() {
 		}
 		id = container.ID
 
-		monitorSet.Add(v)
+		monitorSet.Add(id)
 	}
+
+	lastSetbte, err := ioutil.ReadFile("lastSet.dat")
+	if err != nil {
+		log.Printf("not reading lastSet.dat: %s\n", err)
+	} else {
+		reader := bytes.NewBuffer(lastSetbte)
+
+		for {
+			str, err := reader.ReadString('\n')
+			if err != nil {
+				break
+			}
+
+			str = strings.TrimSpace(str)
+			if str == "" || strings.HasPrefix(str, "#") {
+				continue
+			}
+
+			id := str
+
+			container, err := client.InspectContainer(id)
+			if err != nil {
+				log.Printf("skipping no such container %s\n", id)
+				continue
+			}
+			id = container.ID
+
+			monitorSet.Add(id)
+		}
+	}
+
+	monitorSet.Save(PERSIST_FILE)
 
 	events := make(chan *dclient.APIEvents)
 
@@ -104,6 +142,7 @@ func main() {
 				}
 
 				monitorSet.Add(newContainer.ID)
+				monitorSet.Save(PERSIST_FILE)
 			}
 		}
 		log.Fatalln("docker event loop closed unexpectedly")
@@ -157,6 +196,7 @@ func main() {
 			// add to set
 			monitorSet.Add(id)
 			fmt.Fprint(rw, "OK")
+			defer monitorSet.Save(PERSIST_FILE)
 		case "GET":
 			// check if we're monitoring it
 			if monitorSet.Contains(id) {
@@ -167,6 +207,7 @@ func main() {
 		case "DELETE":
 			monitorSet.Remove(id)
 			fmt.Fprint(rw, "OK")
+			defer monitorSet.Save(PERSIST_FILE)
 		}
 
 	}).Methods("PUT", "GET", "DELETE")

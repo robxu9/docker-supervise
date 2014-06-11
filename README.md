@@ -19,3 +19,7 @@ HTTP API:
         PUT: add ID to the list of containers being monitored
         GET: check if container is being monitored (YES or NO)
         DELETE: do not monitor this container
+
+OS X Users:
+
+	I'll leave [this here](http://dave.cheney.net/2012/09/08/an-introduction-to-cross-compilation-with-go).

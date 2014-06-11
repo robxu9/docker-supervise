@@ -3,6 +3,10 @@ docker-supervise
 
 Monitors IDs and automatically restarts those that die.
 
+Building:
+
+It is probably a good idea to use `go get -u` to retrieve this package, as it also downloads all the necessary dependencies to build it.
+
 Usage:
 
 	`MONITOR`: environment variable of initial IDs, seperated by ':'

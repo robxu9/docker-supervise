@@ -177,11 +177,6 @@ func main() {
 		v := mux.Vars(r)
 		id := v["id"]
 
-		if len(id) != 12 && len(id) != 64 {
-			log.Printf("got invalid length id %s\n", id)
-			http.Error(rw, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
-		}
-
 		// verify ID
 		container, err := client.InspectContainer(id)
 		if err != nil {

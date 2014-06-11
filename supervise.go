@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
 	"io/ioutil"
 	"log"
+	"menteslibres.net/gosexy/to"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-	"github.com/gorilla/mux"
-	"menteslibres.net/gosexy/to"
 
 	dclient "github.com/fsouza/go-dockerclient"
 )
@@ -28,7 +28,7 @@ func envopt(name, def string) string {
 }
 
 func main() {
-	endpoint := envopt("DOCKER", "unix:///var/run/docker.sock")
+	endpoint := envopt("DOCKER_HOST", "unix:///var/run/docker.sock")
 	port := envopt("PORT", "8080")
 
 	client, err := dclient.NewClient(endpoint)

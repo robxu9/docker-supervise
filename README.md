@@ -6,7 +6,7 @@ Monitors IDs and automatically restarts those that die.
 Usage:
 
 	`MONITOR`: environment variable of initial IDs, seperated by ':'
-	`DOCKER`: path to docker socket/port/etc
+	`DOCKER_HOST`: path to docker socket/port/etc
 
 HTTP API:
 

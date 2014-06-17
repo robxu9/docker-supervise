@@ -1,23 +1,22 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/mux"
-	"io/ioutil"
 	"log"
-	"menteslibres.net/gosexy/to"
 	"net/http"
 	"os"
-	"strings"
-	"time"
 
-	dclient "github.com/fsouza/go-dockerclient"
+	"github.com/fsouza/go-dockerclient"
 )
 
 const (
-	PERSIST_FILE = "lastSet.dat"
+	PERSIST_DIR = "containers"
+)
+
+var (
+	confStore *ConfigStore
+	client    *docker.Client
 )
 
 func envopt(name, def string) string {
@@ -31,181 +30,161 @@ func main() {
 	endpoint := envopt("DOCKER_HOST", "unix:///var/run/docker.sock")
 	port := envopt("PORT", "8080")
 
-	client, err := dclient.NewClient(endpoint)
+	client, err := docker.NewClient(endpoint)
 	if err != nil {
-		log.Fatalf("failed to connect to docker: %s\n", err)
+		log.Fatalf("[fatal] failed to connect to docker: %s\n", err)
 	}
 
-	monitor := strings.Split(envopt("MONITOR", ""), ":")
-	monitorSet := NewSet()
-	for _, v := range monitor {
-		if v == "" {
-			continue
-		}
+	persistDir := envopt("PERSIST", PERSIST_DIR)
 
-		id := v
+	var persister Persister = nil
 
-		container, err := client.InspectContainer(id)
-		if err != nil {
-			log.Printf("skipping no such container %s\n", id)
-			continue
-		}
-		id = container.ID
-
-		monitorSet.Add(id)
-	}
-
-	lastSetbte, err := ioutil.ReadFile("lastSet.dat")
-	if err != nil {
-		log.Printf("not reading lastSet.dat: %s\n", err)
+	if _, err := os.Stat(persistDir); os.IsNotExist(err) {
+		log.Printf("[warn] persist dir doesn't exist, not going to persist.")
 	} else {
-		reader := bytes.NewBuffer(lastSetbte)
-
-		for {
-			str, err := reader.ReadString('\n')
-			if err != nil {
-				break
-			}
-
-			str = strings.TrimSpace(str)
-			if str == "" || strings.HasPrefix(str, "#") {
-				continue
-			}
-
-			id := str
-
-			container, err := client.InspectContainer(id)
-			if err != nil {
-				log.Printf("skipping no such container %s\n", id)
-				continue
-			}
-			id = container.ID
-
-			monitorSet.Add(id)
-		}
+		persister = DirectoryPersister(persistDir)
 	}
 
-	monitorSet.Save(PERSIST_FILE)
+	confStore = NewConfigStore(persister)
+	confStore.Load()
 
-	events := make(chan *dclient.APIEvents)
+	events := make(chan *docker.APIEvents)
 
 	// go-dockerclient issue #101
 	client.AddEventListener(events)
 	client.RemoveEventListener(events)
 	err = client.AddEventListener(events)
 	if err != nil {
-		log.Fatalf("failed to add event listener: %s\n", err)
+		log.Fatalf("[fatal] failed to add event listener: %s\n", err)
 	}
 
-	go func() {
-		for event := range events {
-			fmt.Printf("id: %s | status: %s\n", event.ID, event.Status)
-			switch event.Status {
-			case "die":
-				container, err := client.InspectContainer(event.ID)
-				if err != nil {
-					log.Printf("container disappeared?! %s\n", err)
-					break
-				}
+	go monitorEvents(events)
 
-				if !monitorSet.Contains(container.ID) {
-					if !monitorSet.Contains(container.ID[:12]) {
-						// not in our monitor list; ignore
-						break
-					}
-				}
+	http.DefaultServeMux.HandleFunc("/", serveHandler)
 
-				monitorSet.Remove(container.ID)
-				monitorSet.Remove(container.ID[:12])
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
 
-				hostConfig := container.HostConfig
-				name := container.Name[1:]
+func serveHandler(rw http.ResponseWriter, r *http.Request) {
+	// remove prefix /
+	path := r.URL.Path[1:]
 
-				if strings.HasPrefix(name, "restarted_") && strings.Contains(name, "-") {
-					name = name[strings.Index(name, "-")+1:]
-				}
-
-				newContainer, err := client.CreateContainer(dclient.CreateContainerOptions{
-					Name:   "restarted_" + to.String(time.Now().Unix()) + "-" + name,
-					Config: container.Config,
-				})
-
-				if err != nil {
-					log.Printf("failed to create replacement container... %s\n", err)
-					return
-				}
-
-				err = client.StartContainer(newContainer.ID, hostConfig)
-				if err != nil {
-					log.Printf("failed to up replacement container... %s\n", err)
-					return
-				}
-
-				monitorSet.Add(newContainer.ID)
-				monitorSet.Save(PERSIST_FILE)
+	if path == "" {
+		switch r.Method {
+		case "GET":
+			list := make([]string, 0)
+			for k, _ := range confStore.Copy() {
+				list = append(list, k)
 			}
+
+			bte, err := json.MarshalIndent(list, "", "  ")
+			if err != nil {
+				log.Printf("[err] trying to marshal set: %s\n", err)
+				http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(rw, "%s", bte)
+		case "POST":
+			if err := r.ParseForm(); err != nil {
+				http.Error(rw, "can't parse request form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			name := r.Form.Get("id")
+			if name == "" {
+				http.Error(rw, "requires id parameter for monitoring container", http.StatusBadRequest)
+				return
+			}
+
+			err := monitorContainer(name)
+			if err != nil {
+				http.Error(rw, "can't monitor container: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			rw.Header().Set("Location", "/"+name)
+			rw.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(rw, "Invalid Method "+r.Method, http.StatusBadRequest)
 		}
-		log.Fatalln("docker event loop closed unexpectedly")
-	}()
-
-	// setup REST to allow adding/removing IDs dynamically
-	//
-	// /               ==> show all containers being monitored
-	// /{id}  [PUT]    ==> add a container to monitor
-	// /{id}  [GET]    ==> check if a container is being monitored
-	// /{id}  [DELETE] ==> do not monitor a container
-	//
-
-	r := mux.NewRouter()
-
-	r.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
-		list := make([]string, 0)
-		monitorSet.Iterate(func(str string) {
-			list = append(list, str)
-		})
-
-		bte, err := json.MarshalIndent(list, "", "\t")
-		if err != nil {
-			log.Printf("error trying to marshal set: %s\n", err)
-			http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	} else {
+		conf, ok := confStore.Get(path)
+		if !ok {
+			http.Error(rw, "not monitoring "+path, http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(rw, "%s", bte)
-	})
-
-	r.HandleFunc("/{id:[0-9a-z]+}", func(rw http.ResponseWriter, r *http.Request) {
-		v := mux.Vars(r)
-		id := v["id"]
-
-		// verify ID
-		container, err := client.InspectContainer(id)
-		if err != nil {
-			log.Printf("no such id %s\n", id)
-			http.Error(rw, "no such id "+id, http.StatusNotFound)
-			return
-		}
-		id = container.ID
 
 		switch r.Method {
-		case "PUT":
-			// add to set
-			monitorSet.Add(id)
-			fmt.Fprint(rw, "OK")
-			defer monitorSet.Save(PERSIST_FILE)
 		case "GET":
-			// check if we're monitoring it
-			if monitorSet.Contains(id) {
-				fmt.Fprint(rw, "YES")
-			} else {
-				fmt.Fprint(rw, "NO")
-			}
+			bte, _ := json.MarshalIndent(conf, "", "  ")
+			fmt.Fprintf(rw, "%v", bte)
 		case "DELETE":
-			monitorSet.Remove(id)
-			fmt.Fprint(rw, "OK")
-			defer monitorSet.Save(PERSIST_FILE)
+			confStore.Remove(path)
+			rw.WriteHeader(http.StatusOK)
+		default:
+			http.Error(rw, "Invalid Method "+r.Method, http.StatusBadRequest)
 		}
+	}
+}
 
-	}).Methods("PUT", "GET", "DELETE")
+func monitorContainer(name string) error {
+	fmt.Printf("name: %s\n", name)
+	// verify ID
+	container, err := client.InspectContainer(name)
+	if err != nil {
+		return err
+	}
 
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	confStore.Add(container.Name, container.Config)
+	return nil
+}
+
+func monitorEvents(c chan *docker.APIEvents) {
+	for event := range c {
+		if event.Status == "die" {
+			container, err := client.InspectContainer(event.ID)
+
+			if err != nil {
+				log.Printf("[wut] container disappeared?! %s\n", err)
+				break
+			}
+
+			name := container.Name[1:]
+
+			conf, ok := confStore.Get(name)
+			if !ok {
+				// we're not monitoring this name
+				continue
+			}
+
+			hostConfig := container.HostConfig
+
+			// delete old container
+			err = client.RemoveContainer(docker.RemoveContainerOptions{
+				ID: container.ID,
+			})
+
+			if err != nil {
+				log.Printf("[err] failed to delete old container: %s", err)
+				return
+			}
+
+			newContainer, err := client.CreateContainer(docker.CreateContainerOptions{
+				Name:   name,
+				Config: conf,
+			})
+
+			if err != nil {
+				log.Printf("[err] failed to create replacement container... %s\n", err)
+				return
+			}
+
+			err = client.StartContainer(newContainer.ID, hostConfig)
+			if err != nil {
+				log.Printf("[err] failed to up replacement container... %s\n", err)
+				return
+			}
+		}
+	}
+	log.Fatalln("[fatal] docker event loop closed unexpectedly")
 }

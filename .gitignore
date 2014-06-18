@@ -2,3 +2,4 @@ build/
 lastSet.dat
 *~
 *.tar.xz
+containers/

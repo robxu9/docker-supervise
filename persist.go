@@ -110,7 +110,7 @@ func (d DirectoryPersister) Filename(name string) string {
 }
 
 func (d DirectoryPersister) Add(name string, config *docker.Config) error {
-	marshal, err := json.Marshal(config)
+	marshal, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func (d DirectoryPersister) Add(name string, config *docker.Config) error {
 }
 
 func (d DirectoryPersister) Get(name string) (*docker.Config, error) {
-	bte, err := ioutil.ReadFile(name)
+	bte, err := ioutil.ReadFile(d.Filename(name))
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +147,8 @@ func (d DirectoryPersister) GetAll() (map[string]*docker.Config, error) {
 		conf, err := d.Get(name)
 		if err == nil {
 			m[name] = conf
+		} else {
+			log.Printf("[warn] couldn't load %s: %v", name, err)
 		}
 	}
 

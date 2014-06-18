@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/fsouza/go-dockerclient"
 )
@@ -30,7 +31,8 @@ func main() {
 	endpoint := envopt("DOCKER_HOST", "unix:///var/run/docker.sock")
 	port := envopt("PORT", "8080")
 
-	client, err := docker.NewClient(endpoint)
+	var err error
+	client, err = docker.NewClient(endpoint)
 	if err != nil {
 		log.Fatalf("[fatal] failed to connect to docker: %s\n", err)
 	}
@@ -46,7 +48,10 @@ func main() {
 	}
 
 	confStore = NewConfigStore(persister)
-	confStore.Load()
+	err = confStore.Load()
+	if err != nil {
+		log.Printf("[warn] failed to load from persist dir: %v", err)
+	}
 
 	events := make(chan *docker.APIEvents)
 
@@ -66,8 +71,8 @@ func main() {
 }
 
 func serveHandler(rw http.ResponseWriter, r *http.Request) {
-	// remove prefix /
-	path := r.URL.Path[1:]
+	// remove surrounding /
+	path := strings.Trim(r.URL.Path, "/")
 
 	if path == "" {
 		switch r.Method {
@@ -90,9 +95,15 @@ func serveHandler(rw http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			name := r.Form.Get("id")
+			name := strings.Trim(r.Form.Get("id"), "/")
 			if name == "" {
 				http.Error(rw, "requires id parameter for monitoring container", http.StatusBadRequest)
+				return
+			}
+
+			if _, ok := confStore.Get(name); ok {
+				rw.Header().Set("Location", "/"+name)
+				rw.WriteHeader(http.StatusSeeOther)
 				return
 			}
 
@@ -117,9 +128,10 @@ func serveHandler(rw http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			bte, _ := json.MarshalIndent(conf, "", "  ")
-			fmt.Fprintf(rw, "%v", bte)
+			fmt.Fprintf(rw, "%s", bte)
 		case "DELETE":
 			confStore.Remove(path)
+			fmt.Fprintf(rw, "okay, deleted %s.", path)
 			rw.WriteHeader(http.StatusOK)
 		default:
 			http.Error(rw, "Invalid Method "+r.Method, http.StatusBadRequest)
@@ -128,14 +140,13 @@ func serveHandler(rw http.ResponseWriter, r *http.Request) {
 }
 
 func monitorContainer(name string) error {
-	fmt.Printf("name: %s\n", name)
 	// verify ID
 	container, err := client.InspectContainer(name)
 	if err != nil {
 		return err
 	}
 
-	confStore.Add(container.Name, container.Config)
+	confStore.Add(strings.Trim(container.Name, "/"), container.Config)
 	return nil
 }
 
@@ -146,7 +157,7 @@ func monitorEvents(c chan *docker.APIEvents) {
 
 			if err != nil {
 				log.Printf("[wut] container disappeared?! %s\n", err)
-				break
+				continue
 			}
 
 			name := container.Name[1:]
